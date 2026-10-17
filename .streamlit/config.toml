@@ -1,0 +1,13 @@
+[theme]
+base = "light"
+primaryColor = "#1F6B4A"
+backgroundColor = "#F7F4EE"
+secondaryBackgroundColor = "#EFEAE2"
+textColor = "#1C1915"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false
+
+[server]
+folderWatchBlacklist = [".venv", "chroma_db", "data", ".cache"]

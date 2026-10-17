@@ -1,0 +1,113 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R] /Count 3 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Resources << /Font << /F1 3 0 R >> >> >>
+endobj
+5 0 obj
+<< /Length 438 >>
+stream
+BT
+/F1 12 Tf
+16 TL
+54 740 Td
+(Northwind Harbor Operations Brief) Tj
+T*
+() Tj
+T*
+(Call date: 18 March 2026. Prepared for the night-shift docking team.) Tj
+T*
+() Tj
+T*
+(The vessel Kestrel arrives at Northwind Harbor on 18 March 2026. The docking window) Tj
+T*
+(is 04:30 to 06:15 local time. The assigned berth is Pier 7, berth C.) Tj
+T*
+() Tj
+T*
+(The harbor master on duty is Elena Voss. Reach the harbor master on radio channel 14.) Tj
+ET
+
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 7 0 R /Resources << /Font << /F1 3 0 R >> >> >>
+endobj
+7 0 obj
+<< /Length 466 >>
+stream
+BT
+/F1 12 Tf
+16 TL
+54 740 Td
+(Cargo and restrictions) Tj
+T*
+() Tj
+T*
+(The cargo is 1240 crates of cold-chain salmon. Crates must stay at or below 2 degrees) Tj
+T*
+(Celsius. The invoice code for this call is NH-4481.) Tj
+T*
+() Tj
+T*
+(Night crane operations stop when sustained wind exceeds 25 knots. The backup berth,) Tj
+T*
+(if Pier 7 is occupied, is Pier 3, berth A.) Tj
+T*
+() Tj
+T*
+(Tug assistance is required because the Kestrel has a draft of 9.4 meters.) Tj
+ET
+
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 9 0 R /Resources << /Font << /F1 3 0 R >> >> >>
+endobj
+9 0 obj
+<< /Length 329 >>
+stream
+BT
+/F1 12 Tf
+16 TL
+54 740 Td
+(Boarding and contacts) Tj
+T*
+() Tj
+T*
+(Pilot boarding is at buoy NH-2. The agent is Marlow and Finch. The agent phone number) Tj
+T*
+(is 555-0148.) Tj
+T*
+() Tj
+T*
+(Do not discharge ballast inside the inner basin. Fuel barge access is on the south) Tj
+T*
+(side of Pier 7 and opens after 07:00.) Tj
+ET
+
+endstream
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000127 00000 n 
+0000000197 00000 n 
+0000000323 00000 n 
+0000000812 00000 n 
+0000000938 00000 n 
+0000001455 00000 n 
+0000001581 00000 n 
+trailer << /Size 10 /Root 1 0 R >>
+startxref
+1961
+%%EOF
