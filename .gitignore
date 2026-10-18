@@ -8,5 +8,6 @@ chroma_db/
 .DS_Store
 data/pdfs/*
 !data/pdfs/.gitkeep
+data/edgar/
 *.egg-info/
 .streamlit/secrets.toml

@@ -1,24 +1,32 @@
-"""Chat UI for the PDF agent."""
+"""Chat UI for Magnificent 7 earnings questions."""
 
 from __future__ import annotations
 
+import html
 import traceback
 
 import streamlit as st
 
-from rag_agent.config import DATA_DIR, SAMPLE_PDF, api_key, get_settings
-from rag_agent.graph import AnswerResult, MissingAPIKeyError, Step, iter_answer
-from rag_agent.ingest import ingest_pdf, save_upload
+from rag_agent.config import api_key, get_settings
+from rag_agent.earnings import MAG7, load_mag7, normalize_ticker
+from rag_agent.graph import (
+    AnswerResult,
+    InvalidAPIKeyError,
+    MissingAPIKeyError,
+    Step,
+    iter_answer,
+)
 from rag_agent.store import clear_library, library_count, list_documents, remove_document
 
-st.set_page_config(page_title="PDF Agent", page_icon=":page_facing_up:", layout="wide")
+st.set_page_config(page_title="Earnings Agent", page_icon=":chart_with_upwards_trend:", layout="wide")
 
 MODEL_CHOICES = ["claude-opus-5-5"]
+TICKER_CHOICES = ["From the question", *MAG7.keys()]
 
 EXAMPLES = [
-    "When is the Kestrel's docking window?",
-    "What is the backup berth if Pier 7 is occupied?",
-    "What is the invoice code for this call?",
+    "What was NVDA diluted EPS in the latest quarter?",
+    "What are AAPL's revenue streams in the latest fiscal year?",
+    "Which companies did MSFT sign contracts with in the last two years?",
 ]
 
 
@@ -46,19 +54,69 @@ def _apply_key() -> None:
         os.environ.pop("ANTHROPIC_API_KEY", None)
 
 
+def _source_fields(source: object) -> tuple[str, int | None, str, str]:
+    if isinstance(source, dict):
+        return (
+            str(source.get("source") or ""),
+            source.get("page"),
+            str(source.get("excerpt") or ""),
+            str(source.get("url") or ""),
+        )
+    return (
+        str(getattr(source, "source", "")),
+        getattr(source, "page", None),
+        str(getattr(source, "excerpt", "") or ""),
+        str(getattr(source, "url", "") or ""),
+    )
+
+
+def _show_sources(sources: list, *, expanded: bool) -> None:
+    documents: dict[str, dict] = {}
+    articles = []
+    filings = []
+    for source in sources:
+        name, page, excerpt, url = _source_fields(source)
+        if url.startswith(("https://", "http://")) and "sec.gov" in url:
+            entry = documents.setdefault(url, {"name": name, "excerpts": []})
+            if excerpt and excerpt not in entry["excerpts"]:
+                entry["excerpts"].append(excerpt)
+        elif url.startswith(("https://", "http://")):
+            articles.append((name, excerpt, url))
+        else:
+            filings.append((name, page, excerpt))
+    if documents:
+        with st.expander("Source documents", expanded=expanded):
+            for url, entry in documents.items():
+                _external_link(entry["name"], url)
+                for excerpt in entry["excerpts"][:2]:
+                    st.write(excerpt)
+    if articles:
+        with st.expander("News articles", expanded=expanded):
+            for name, excerpt, url in articles:
+                title = excerpt.splitlines()[0] if excerpt else name
+                _external_link(title, url)
+                st.caption(name)
+    if filings:
+        with st.expander("Passages used", expanded=expanded and not documents and not articles):
+            for name, page, excerpt in filings:
+                label = f"{name}, page {page}" if page else name
+                st.markdown(f"**{label}**")
+                st.write(excerpt)
+
+
+def _external_link(label: str, url: str) -> None:
+    st.markdown(
+        f'<a href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">{html.escape(label)}</a>',
+        unsafe_allow_html=True,
+    )
+
+
 def _render_message(message: dict) -> None:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         sources = message.get("sources") or []
         if sources:
-            with st.expander("Passages used"):
-                for source in sources:
-                    page = source.get("page")
-                    label = source["source"]
-                    if page:
-                        label = f"{label}, page {page}"
-                    st.markdown(f"**{label}**")
-                    st.write(source.get("excerpt") or "")
+            _show_sources(sources, expanded=False)
         steps = message.get("steps") or []
         if steps:
             with st.expander("How the agent got here"):
@@ -95,22 +153,21 @@ def _run_question(question: str) -> None:
                         "The agent finished without an answer.", [], steps
                     )
                 status.update(label="Answer ready", state="complete", expanded=False)
-            except MissingAPIKeyError as exc:
+            except (MissingAPIKeyError, InvalidAPIKeyError) as exc:
                 result = AnswerResult(str(exc), [], steps)
                 status.update(label="Needs an API key", state="error", expanded=False)
             except Exception as exc:
                 traceback.print_exc()
-                result = AnswerResult(f"The request failed: {exc}", [], steps)
+                message = str(exc)
+                if "invalid x-api-key" in message or "authentication_error" in message:
+                    message = str(InvalidAPIKeyError())
+                else:
+                    message = f"The request failed: {exc}"
+                result = AnswerResult(message, [], steps)
                 status.update(label="The request failed", state="error", expanded=True)
         st.markdown(result.answer)
         if result.sources:
-            with st.expander("Passages used", expanded=True):
-                for source in result.sources:
-                    label = source.source
-                    if source.page:
-                        label = f"{label}, page {source.page}"
-                    st.markdown(f"**{label}**")
-                    st.write(source.excerpt)
+            _show_sources(result.sources, expanded=True)
 
     st.session_state.messages.append(user_message)
     st.session_state.messages.append(
@@ -122,6 +179,7 @@ def _run_question(question: str) -> None:
                     "source": source.source,
                     "page": source.page,
                     "excerpt": source.excerpt,
+                    "url": source.url,
                 }
                 for source in result.sources
             ],
@@ -132,67 +190,49 @@ def _run_question(question: str) -> None:
 
 def _sidebar() -> None:
     with st.sidebar:
-        st.header("Library")
+        st.header("Earnings library")
         st.caption(
-            "PDFs are split, embedded locally, and stored in Chroma. "
+            "Statements are pulled from SEC EDGAR, embedded locally, and stored in Chroma. "
             "Claude only receives the passages needed for a question."
         )
         st.text_input(
             "Anthropic API key",
             type="password",
             key="api_key",
-            help="Stored in this browser session. You can also put ANTHROPIC_API_KEY in .env.",
+            help="Use a key from console.anthropic.com. It starts with sk-ant-.",
         )
         with st.expander("Model"):
             st.selectbox("Claude model", MODEL_CHOICES, key="model")
 
-        uploads = st.file_uploader(
-            "Add PDFs",
-            type=["pdf"],
-            accept_multiple_files=True,
-        )
-        if st.button("Index uploaded PDFs", disabled=not uploads, width="stretch"):
-            messages = []
-            for upload in uploads or []:
-                try:
-                    path = save_upload(upload.name, upload.getvalue())
-                except ValueError as exc:
-                    messages.append(f"{upload.name}: {exc}")
-                    continue
-                result = ingest_pdf(path)
+        st.caption("AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA")
+        if st.button("Load Magnificent 7 earnings", width="stretch"):
+            with st.spinner("Downloading filings from SEC EDGAR…"):
+                results = load_mag7()
+            lines = []
+            for result in results:
                 if result.error:
-                    messages.append(f"{result.source}: {result.error}")
+                    lines.append(f"{result.ticker}: {result.error}")
                 else:
-                    messages.append(
-                        f"{result.source}: {result.chunks} passages from {result.pages} pages"
+                    lines.append(
+                        f"{result.ticker}: {result.periods} earnings periods, "
+                        f"{result.contract_passages} contract passages"
                     )
-            st.session_state.notice = "\n".join(messages)
-            st.rerun()
-
-        if SAMPLE_PDF.is_file() and st.button("Index the sample brief", width="stretch"):
-            result = ingest_pdf(SAMPLE_PDF)
-            if result.error:
-                st.session_state.notice = result.error
-            else:
-                st.session_state.notice = (
-                    f"Indexed {result.source}: {result.chunks} passages"
-                )
+            st.session_state.notice = "\n".join(lines)
             st.rerun()
 
         documents = list_documents()
         st.subheader(f"{library_count()} passages")
         if not documents:
             st.caption("Nothing is indexed yet.")
+        grouped: dict[str, list] = {}
         for document in documents:
-            page_count = len(document.pages)
-            st.markdown(
-                f"**{document.source}**  \n{document.chunks} passages · {page_count} pages"
-            )
-            if st.button("Remove", key=f"remove-{document.source}"):
-                remove_document(document.source)
-                uploaded = DATA_DIR / document.source
-                if uploaded.is_file():
-                    uploaded.unlink()
+            ticker = document.source.split()[0]
+            grouped.setdefault(ticker, []).append(document)
+        for ticker, items in grouped.items():
+            st.markdown(f"**{ticker}**  \n{len(items)} indexed sections")
+            if st.button("Remove", key=f"remove-{ticker}"):
+                for item in items:
+                    remove_document(item.source)
                 st.rerun()
 
         if documents and st.button("Clear library", width="stretch"):
@@ -205,10 +245,11 @@ def main() -> None:
     _apply_key()
     _sidebar()
 
-    st.title("PDF Agent")
+    st.title("Earnings Agent")
     st.caption(
-        "Ask a question. The agent searches your PDFs in Chroma, checks that the "
-        "passages fit, and Claude Opus 5.5 writes the answer from that context."
+        "Earnings questions use the latest statement. A contract question searches the "
+        "last two years of filings, then summarizes public news about each named "
+        "counterparty from the past year."
     )
 
     notice = st.session_state.get("notice")
@@ -219,29 +260,29 @@ def main() -> None:
     documents = list_documents()
     if not documents:
         st.info(
-            "Index the sample brief, or upload your own PDFs, then ask a question. "
-            "The first index downloads a small local embedding model."
+            "Load the Magnificent 7 earnings, then ask about a symbol. "
+            "The first load downloads a small local embedding model."
         )
 
     for message in st.session_state.messages:
         _render_message(message)
 
     pending = st.session_state.pop("pending_question", None)
-    if (
-        not st.session_state.messages
-        and any(document.source == SAMPLE_PDF.name for document in documents)
-        and pending is None
-    ):
-        st.write("Try one of these on the sample brief:")
+    if documents and not st.session_state.messages and pending is None:
+        st.write("Try one of these:")
         columns = st.columns(len(EXAMPLES))
         for column, example in zip(columns, EXAMPLES):
             if column.button(example):
                 st.session_state.pending_question = example
                 st.rerun()
 
-    typed = st.chat_input("Ask about the indexed PDFs")
+    selected = st.selectbox("Stock symbol", TICKER_CHOICES)
+    typed = st.chat_input("Ask about earnings for a stock symbol")
     question = pending or typed
     if question:
+        symbol = None if selected == "From the question" else normalize_ticker(selected)
+        if symbol and symbol not in question.upper():
+            question = f"Ticker: {symbol}. {question}"
         _run_question(question)
 
 

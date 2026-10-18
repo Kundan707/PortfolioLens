@@ -10,7 +10,7 @@ from rag_agent.graph import MissingAPIKeyError, answer
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Ask Claude a question about the indexed PDFs."
+        description="Ask Claude a question about indexed Magnificent 7 earnings."
     )
     parser.add_argument("question", nargs="+", help="Question to answer")
     args = parser.parse_args(argv)
@@ -27,8 +27,9 @@ def main(argv: list[str] | None = None) -> int:
     if result.sources:
         print("\nSources")
         for source in result.sources:
-            page = f", page {source.page}" if source.page else ""
-            print(f"- {source.source}{page}")
+            page = f", page {source.page}" if source.page and not source.url else ""
+            link = f" {source.url}" if source.url else ""
+            print(f"- {source.source}{page}{link}")
     if result.steps:
         print("\nTrace")
         for step in result.steps:
