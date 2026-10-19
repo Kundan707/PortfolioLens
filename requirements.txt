@@ -8,4 +8,5 @@ pypdf>=5.4.0
 fastembed>=0.6.0
 streamlit>=1.45.0
 python-dotenv>=1.1.0
+numbers-parser>=4.22.0
 pytest>=8.3.0

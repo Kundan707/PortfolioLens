@@ -1,4 +1,4 @@
-"""Chat UI for Magnificent 7 earnings questions."""
+"""Chat UI for earnings questions about the stocks in the user's portfolio."""
 
 from __future__ import annotations
 
@@ -7,8 +7,9 @@ import traceback
 
 import streamlit as st
 
-from rag_agent.config import api_key, get_settings
-from rag_agent.earnings import MAG7, load_mag7, normalize_ticker
+from rag_agent.citations import document_name
+from rag_agent.config import api_key, chroma_path, get_settings, portfolio_path
+from rag_agent.earnings import load_portfolio, normalize_ticker
 from rag_agent.graph import (
     AnswerResult,
     InvalidAPIKeyError,
@@ -16,16 +17,24 @@ from rag_agent.graph import (
     Step,
     iter_answer,
 )
+from rag_agent.portfolio import PortfolioError, portfolio_tickers
 from rag_agent.store import clear_library, library_count, list_documents, remove_document
 
-st.set_page_config(page_title="Earnings Agent", page_icon=":chart_with_upwards_trend:", layout="wide")
+st.set_page_config(page_title="Portfolio Lens", page_icon=":chart_with_upwards_trend:", layout="wide")
 
 MODEL_CHOICES = ["claude-opus-5-5"]
-TICKER_CHOICES = ["From the question", *MAG7.keys()]
+
+
+def _holdings() -> tuple[str, ...]:
+    try:
+        return portfolio_tickers()
+    except PortfolioError:
+        return ()
 
 EXAMPLES = [
     "What was NVDA diluted EPS in the latest quarter?",
     "What are AAPL's revenue streams in the latest fiscal year?",
+    "How has MSFT quarterly revenue and net income changed over the last two years?",
     "Which companies did MSFT sign contracts with in the last two years?",
 ]
 
@@ -42,6 +51,8 @@ def _init_state() -> None:
             else MODEL_CHOICES[0]
         )
     st.session_state.setdefault("notice", None)
+    st.session_state.setdefault("allowed_pulls", [])
+    st.session_state.setdefault("pending_pull", None)
 
 
 def _apply_key() -> None:
@@ -99,7 +110,11 @@ def _show_sources(sources: list, *, expanded: bool) -> None:
     if filings:
         with st.expander("Passages used", expanded=expanded and not documents and not articles):
             for name, page, excerpt in filings:
-                label = f"{name}, page {page}" if page else name
+                document = document_name(excerpt)
+                if document:
+                    label = document if " filed " in name else f"{document} ({name})"
+                else:
+                    label = f"{name}, page {page}" if page else name
                 st.markdown(f"**{label}**")
                 st.write(excerpt)
 
@@ -142,6 +157,7 @@ def _run_question(question: str) -> None:
                     question,
                     history=prior,
                     model=st.session_state.model,
+                    allow_pulls=st.session_state.allowed_pulls,
                 ):
                     if isinstance(event, Step):
                         steps.append(event.text)
@@ -186,6 +202,28 @@ def _run_question(question: str) -> None:
             "steps": result.steps or steps,
         }
     )
+    if result.pull_ticker:
+        st.session_state.pending_pull = {"ticker": result.pull_ticker, "question": question}
+        st.rerun()
+
+
+def _offer_pull() -> None:
+    offer = st.session_state.pending_pull
+    if not offer:
+        return
+    ticker = offer["ticker"]
+    yes, no, _ = st.columns([1, 1, 4])
+    if yes.button(f"Yes, pull {ticker}", type="primary"):
+        st.session_state.allowed_pulls.append(ticker)
+        st.session_state.pending_question = offer["question"]
+        st.session_state.pending_pull = None
+        st.rerun()
+    if no.button("No, skip it"):
+        st.session_state.messages.append(
+            {"role": "assistant", "content": f"OK. I did not pull {ticker}, and nothing was stored."}
+        )
+        st.session_state.pending_pull = None
+        st.rerun()
 
 
 def _sidebar() -> None:
@@ -195,6 +233,8 @@ def _sidebar() -> None:
             "Statements are pulled from SEC EDGAR, embedded locally, and stored in Chroma. "
             "Claude only receives the passages needed for a question."
         )
+        strategy = get_settings().chunking
+        st.caption(f"Chunking: {'semantic' if strategy == 'semantic' else 'fixed-size'} · Chroma at `{chroma_path().name}/`")
         st.text_input(
             "Anthropic API key",
             type="password",
@@ -204,10 +244,17 @@ def _sidebar() -> None:
         with st.expander("Model"):
             st.selectbox("Claude model", MODEL_CHOICES, key="model")
 
-        st.caption("AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA")
-        if st.button("Load Magnificent 7 earnings", width="stretch"):
+        st.subheader("Portfolio")
+        try:
+            holdings = portfolio_tickers()
+        except PortfolioError as exc:
+            holdings = ()
+            st.error(str(exc))
+        if holdings:
+            st.caption(f"{', '.join(holdings)}  \nFrom {portfolio_path().name}")
+        if holdings and st.button("Load portfolio earnings", width="stretch"):
             with st.spinner("Downloading filings from SEC EDGAR…"):
-                results = load_mag7()
+                results = load_portfolio()
             lines = []
             for result in results:
                 if result.error:
@@ -229,7 +276,8 @@ def _sidebar() -> None:
             ticker = document.source.split()[0]
             grouped.setdefault(ticker, []).append(document)
         for ticker, items in grouped.items():
-            st.markdown(f"**{ticker}**  \n{len(items)} indexed sections")
+            held = "" if ticker in holdings else " (not in portfolio)"
+            st.markdown(f"**{ticker}**{held}  \n{len(items)} indexed sections")
             if st.button("Remove", key=f"remove-{ticker}"):
                 for item in items:
                     remove_document(item.source)
@@ -245,7 +293,7 @@ def main() -> None:
     _apply_key()
     _sidebar()
 
-    st.title("Earnings Agent")
+    st.title("Portfolio Lens")
     st.caption(
         "Earnings questions use the latest statement. A contract question searches the "
         "last two years of filings, then summarizes public news about each named "
@@ -260,12 +308,13 @@ def main() -> None:
     documents = list_documents()
     if not documents:
         st.info(
-            "Load the Magnificent 7 earnings, then ask about a symbol. "
-            "The first load downloads a small local embedding model."
+            "Load your portfolio earnings, or just ask about a symbol you hold and it will be "
+            "pulled from SEC EDGAR. The first load downloads a small local embedding model."
         )
 
     for message in st.session_state.messages:
         _render_message(message)
+    _offer_pull()
 
     pending = st.session_state.pop("pending_question", None)
     if documents and not st.session_state.messages and pending is None:
@@ -276,9 +325,11 @@ def main() -> None:
                 st.session_state.pending_question = example
                 st.rerun()
 
-    selected = st.selectbox("Stock symbol", TICKER_CHOICES)
+    selected = st.selectbox("Stock symbol", ["From the question", *_holdings()])
     typed = st.chat_input("Ask about earnings for a stock symbol")
     question = pending or typed
+    if typed:
+        st.session_state.pending_pull = None
     if question:
         symbol = None if selected == "From the question" else normalize_ticker(selected)
         if symbol and symbol not in question.upper():

@@ -128,6 +128,22 @@ def remove_document(source: str) -> int:
     return len(ids)
 
 
+def ticker_count(ticker: str) -> int:
+    collection = _open_collection()
+    if collection is None:
+        return 0
+    return len(collection.get(where={"ticker": ticker}, include=[]).get("ids") or [])
+
+
+def replace_ticker(ticker: str, documents: list, ids: list[str]) -> None:
+    collection = _open_collection()
+    if collection is not None:
+        collection.delete(where={"ticker": ticker})
+    store = get_vectorstore()
+    for start in range(0, len(documents), 64):
+        store.add_documents(documents[start : start + 64], ids=ids[start : start + 64])
+
+
 def clear_library() -> None:
     client = get_client()
     existing = {collection.name for collection in client.list_collections()}

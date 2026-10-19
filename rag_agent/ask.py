@@ -10,12 +10,19 @@ from rag_agent.graph import MissingAPIKeyError, answer
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Ask Claude a question about indexed Magnificent 7 earnings."
+        description="Ask Claude a question about the earnings of stocks in your portfolio."
     )
     parser.add_argument("question", nargs="+", help="Question to answer")
+    parser.add_argument(
+        "--pull",
+        action="append",
+        default=[],
+        metavar="TICKER",
+        help="Pull and store this symbol even though it is not in your portfolio",
+    )
     args = parser.parse_args(argv)
     try:
-        result = answer(" ".join(args.question))
+        result = answer(" ".join(args.question), allow_pulls=args.pull)
     except MissingAPIKeyError as exc:
         print(exc, file=sys.stderr)
         return 2
@@ -24,6 +31,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(result.answer)
+    if result.pull_ticker:
+        print(f"\nTo pull it, ask again with --pull {result.pull_ticker}")
     if result.sources:
         print("\nSources")
         for source in result.sources:

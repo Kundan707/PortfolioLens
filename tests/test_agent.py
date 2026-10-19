@@ -4,14 +4,18 @@ from __future__ import annotations
 
 from pypdf import PdfReader
 
-from rag_agent.citations import format_passages, parse_sources
+from rag_agent.citations import document_name, format_passages, parse_sources
 from rag_agent.news import headlines_from_rss, select_relevant
 from datetime import date
 
 from rag_agent.earnings import contract_passages, normalize_focus, normalize_ticker, statement_documents
 from rag_agent.streams import revenue_streams
 from rag_agent.config import get_settings
-from rag_agent.graph import message_text, route_after_grade
+from langchain_core.messages import ToolMessage
+from langgraph.graph import END
+
+from rag_agent.graph import _pull_request, message_text, route_after_grade, search_earnings
+from rag_agent.portfolio import portfolio_tickers, tickers_from_rows
 from rag_agent.ingest import ingest_pdf
 from rag_agent.pdf_writer import write_text_pdf
 from rag_agent.store import get_vectorstore, reset_client
@@ -160,6 +164,8 @@ def test_earnings_statements_keep_ticker_and_figures():
     assert tags == {"latest_year", "latest_quarter"}
     assert normalize_focus("contracts") == "contracts"
     assert normalize_focus("fiscal year") == "latest_year"
+    assert normalize_focus("two_years") == "two_years"
+    assert normalize_focus("latest") == "latest_quarter"
     passages = contract_passages(
         "The company entered into a supply agreement with Acme Robotics during the quarter.\n\n"
         "Revenue increased.\n\n"
@@ -226,6 +232,41 @@ def test_filing_passage_keeps_the_document_link():
     assert parsed[0].source.startswith("AAPL")
     assert parsed[0].url.startswith("https://www.sec.gov/")
     assert "Revenue" in parsed[0].excerpt
+
+
+def test_portfolio_symbols_skip_cash_and_totals(tmp_path):
+    rows = [
+        ["Account Summary", None],
+        ["Symbol", "Last Price $"],
+        ["TSLA", 354.72],
+        ["goog", 180.0],
+        ["CASH", None],
+        ["TOTAL", None],
+        ["Generated at Oct 18 2026 02:40 PM ET", None],
+    ]
+    assert tickers_from_rows(rows) == ("TSLA", "GOOGL")
+    path = tmp_path / "portfolio.csv"
+    path.write_text("Symbol,Qty #\nAAPL,10\nMSFT,5\nCASH,\n", encoding="utf-8")
+    assert portfolio_tickers(path) == ("AAPL", "MSFT")
+
+
+def test_symbol_outside_portfolio_asks_before_pulling(tmp_path, monkeypatch):
+    path = tmp_path / "portfolio.csv"
+    path.write_text("Symbol\nAAPL\nTSLA\n", encoding="utf-8")
+    monkeypatch.setenv("PORTFOLIO_FILE", str(path))
+    monkeypatch.setenv("CHROMA_DIR", str(tmp_path / "chroma"))
+    reset_client()
+    reply = search_earnings.invoke({"query": "revenue", "ticker": "META", "focus": "latest_quarter"})
+    reset_client()
+    assert reply.startswith("META is not part of your portfolio")
+    assert _pull_request({"messages": [ToolMessage(content=reply, tool_call_id="1")]}) == "META"
+    assert route_after_grade({"messages": [], "grade": "needs_pull", "rewrites": 0}) == END
+
+
+def test_document_name_from_filing_header():
+    excerpt = "Ticker: AAPL\nCompany: Apple Inc.\nForm: 10-K\nFiled: 2025-10-31\n\nApple has agreements with..."
+    assert document_name(excerpt) == "Apple Inc. Form 10-K, filed 2025-10-31"
+    assert document_name("The assigned berth is Pier 7.") == ""
 
 
 def test_revenue_streams_from_filing_facts():

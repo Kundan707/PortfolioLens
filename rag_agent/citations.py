@@ -43,6 +43,18 @@ def parse_sources(content: str) -> list[Source]:
     return sources
 
 
+def document_name(excerpt: str) -> str:
+    fields: dict[str, str] = {}
+    for line in excerpt.splitlines()[:8]:
+        key, sep, value = line.partition(":")
+        if sep and key in ("Company", "Form", "Filed") and key not in fields:
+            fields[key] = value.strip()
+    if not fields.get("Form"):
+        return ""
+    name = f"{fields['Company']} Form {fields['Form']}" if fields.get("Company") else f"Form {fields['Form']}"
+    return f"{name}, filed {fields['Filed']}" if fields.get("Filed") else name
+
+
 def _link(lines: list[str]) -> tuple[str, list[str]]:
     url = ""
     body: list[str] = []

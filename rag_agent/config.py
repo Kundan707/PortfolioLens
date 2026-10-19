@@ -25,6 +25,7 @@ class Settings:
     chunk_size: int
     chunk_overlap: int
     max_rewrites: int
+    chunking: str
 
 
 def get_settings() -> Settings:
@@ -36,14 +37,24 @@ def get_settings() -> Settings:
         chunk_size=_positive_int("CHUNK_SIZE", 1000),
         chunk_overlap=_positive_int("CHUNK_OVERLAP", 150),
         max_rewrites=_non_negative_int("MAX_REWRITES", 1),
+        chunking="semantic" if os.getenv("CHUNKING", "").strip().lower() == "semantic" else "fixed",
     )
+ 
+
+CHROMA_DIRS = {"fixed": "chroma_db", "semantic": "chroma_db_semantic"}
 
 
 def chroma_path() -> Path:
+    """Each chunking strategy has its own Chroma instance, so their chunks never mix."""
     override = os.environ.get("CHROMA_DIR")
-    path = Path(override) if override else ROOT / "chroma_db"
+    path = Path(override) if override else ROOT / CHROMA_DIRS[get_settings().chunking]
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def portfolio_path() -> Path:
+    override = os.environ.get("PORTFOLIO_FILE")
+    return Path(override).expanduser() if override else ROOT / "data" / "portfolio" / "PortfolioDownload.xls"
 
 
 def api_key() -> str:

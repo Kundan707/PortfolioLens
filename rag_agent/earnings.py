@@ -1,4 +1,4 @@
-"""Download Magnificent 7 earnings figures from SEC EDGAR and store them in Chroma."""
+"""Download portfolio earnings figures from SEC EDGAR and store them in Chroma."""
 
 from __future__ import annotations
 
@@ -12,14 +12,16 @@ from datetime import date
 from html.parser import HTMLParser
 
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-
+from rag_agent.chunking import fixed_chunks, semantic_chunks
 from rag_agent.config import ROOT, get_settings
-from rag_agent.store import clear_library, get_vectorstore, reset_client
+from rag_agent.portfolio import clean_ticker, portfolio_tickers
+from rag_agent.store import replace_ticker, reset_client, ticker_count
 from rag_agent.streams import revenue_streams
 
 # SEC asks every client to send a descriptive User-Agent.
 _USER_AGENT = "Mag7EarningsAgent research@example.com"
+_COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+_SYMBOL = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
 _FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 _SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 _ARCHIVE = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/{document}"
@@ -69,21 +71,49 @@ class EarningsLoad:
 
 
 def normalize_ticker(value: str) -> str | None:
-    ticker = (value or "").strip().upper()
-    if ticker == "GOOG":
-        ticker = "GOOGL"
-    if ticker in MAG7:
-        return ticker
+    ticker = clean_ticker(value)
+    return ticker if _SYMBOL.match(ticker) else None
+
+
+def company_for(ticker: str) -> tuple[str, str] | None:
+    """Return the SEC CIK and company name for a ticker, or None if SEC does not list it."""
+    symbol = clean_ticker(ticker)
+    if symbol in MAG7:
+        return MAG7[symbol]
+    for entry in _company_tickers().values():
+        if clean_ticker(str(entry.get("ticker") or "")) == symbol:
+            title = str(entry.get("title") or symbol)
+            return f"{int(entry['cik_str']):010d}", title.title() if title.isupper() else title
     return None
 
 
-def load_mag7(*, pause_seconds: float = 0.12) -> list[EarningsLoad]:
-    """Store two years of earnings, and filing passages for contract questions."""
+def load_portfolio(*, pause_seconds: float = 0.12) -> list[EarningsLoad]:
+    return load_tickers(portfolio_tickers(), pause_seconds=pause_seconds)
+
+
+def ensure_ticker(ticker: str) -> EarningsLoad | None:
+    """Pull a ticker from SEC EDGAR when Chroma has nothing stored for it yet."""
+    symbol = clean_ticker(ticker)
+    if ticker_count(symbol):
+        return None
+    return load_tickers([symbol])[0]
+
+
+def load_tickers(tickers, *, pause_seconds: float = 0.12) -> list[EarningsLoad]:
+    """Store two years of earnings and contract passages, replacing each ticker's old data."""
     cutoff = _cutoff(date.today())
     results: list[EarningsLoad] = []
-    documents: list[Document] = []
-    ids: list[str] = []
-    for ticker, (cik, company) in MAG7.items():
+    for raw in tickers:
+        ticker = clean_ticker(raw)
+        try:
+            found = company_for(ticker)
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+            results.append(EarningsLoad(ticker, ticker, 0, 0, f"Could not look up the SEC ticker list: {exc}"))
+            continue
+        if found is None:
+            results.append(EarningsLoad(ticker, ticker, 0, 0, "SEC EDGAR does not list this symbol as a filer."))
+            continue
+        cik, company = found
         try:
             payload = fetch_company_facts(cik)
             time.sleep(pause_seconds)
@@ -103,6 +133,10 @@ def load_mag7(*, pause_seconds: float = 0.12) -> list[EarningsLoad]:
                 streams=streams,
                 filing_urls=_filing_urls(cik, submissions),
             )
+        except urllib.error.HTTPError as exc:
+            reason = "SEC has no XBRL earnings data for this company." if exc.code == 404 else str(exc)
+            results.append(EarningsLoad(ticker, company, 0, 0, reason))
+            continue
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
             results.append(EarningsLoad(ticker, company, 0, 0, str(exc)))
             time.sleep(pause_seconds)
@@ -111,16 +145,9 @@ def load_mag7(*, pause_seconds: float = 0.12) -> list[EarningsLoad]:
             results.append(EarningsLoad(ticker, company, 0, 0, "SEC returned nothing for this window."))
         else:
             built = statements + passages
-            for index, document in enumerate(built):
-                documents.append(document)
-                ids.append(f"{ticker}:{index}")
-            results.append(
-                EarningsLoad(ticker, company, len(statements), len(passages))
-            )
+            replace_ticker(ticker, built, [f"{ticker}:{index}" for index in range(len(built))])
+            results.append(EarningsLoad(ticker, company, len(statements), len(passages)))
         time.sleep(pause_seconds)
-
-    if documents:
-        _replace(documents, ids)
     return results
 
 
@@ -132,11 +159,16 @@ def fetch_submissions(cik: str) -> dict:
     return _get_json(_SUBMISSIONS_URL.format(cik=cik))
 
 
+EARNINGS_TAGS = ("latest_quarter", "latest_year", "history")
+
+
 def normalize_focus(value: str) -> str:
-    """Map a tool argument to latest_quarter, latest_year, or contracts."""
+    """Map a tool argument to latest_quarter, latest_year, two_years, or contracts."""
     text = (value or "").strip().lower().replace("-", "_").replace(" ", "_")
     if text in {"latest_year", "annual", "year", "fiscal_year", "latest_annual"}:
         return "latest_year"
+    if text in {"two_years", "two_year", "2_years", "last_two_years", "history", "trend", "all_periods"}:
+        return "two_years"
     if text in {"contracts", "contract", "customers", "partners", "agreements"}:
         return "contracts"
     return "latest_quarter"
@@ -192,12 +224,7 @@ def statement_documents(
         )
     if not documents:
         return []
-    settings = get_settings()
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=settings.chunk_size,
-        chunk_overlap=settings.chunk_overlap,
-    )
-    return splitter.split_documents(documents)
+    return fixed_chunks(documents)
 
 
 def _periods(payload: dict) -> list[dict]:
@@ -320,11 +347,7 @@ def filing_documents(
     """Index contract passages and collect revenue streams from the same filings."""
     documents: list[Document] = []
     streams: dict[tuple[str, str], list[tuple[str, float]]] = {}
-    settings = get_settings()
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=settings.chunk_size,
-        chunk_overlap=settings.chunk_overlap,
-    )
+    semantic = get_settings().chunking == "semantic"
     for filing in _recent_filings(submissions, cutoff):
         try:
             html = _download_filing(ticker, cik, filing)
@@ -334,28 +357,26 @@ def filing_documents(
         time.sleep(pause_seconds)
         _keep_streams(streams, revenue_streams(html))
         passages = contract_passages(_html_to_text(html), form=filing["form"])
-        for passage in passages:
-            documents.append(
-                Document(
-                    page_content=(
-                        f"Ticker: {ticker}\nCompany: {company}\n"
-                        f"Form: {filing['form']}\nFiled: {filing['filed']}\n\n{passage}"
-                    ),
-                    metadata={
-                        "source": f"{ticker} {filing['form']} filed {filing['filed']}",
-                        "ticker": ticker,
-                        "company": company,
-                        "period": filing["filed"],
-                        "form": filing["form"],
-                        "focus_tag": "contracts",
-                        "page": 1,
-                        "url": _archive_url(cik, filing["accession"], filing["document"]),
-                    },
-                )
+        header = f"Ticker: {ticker}\nCompany: {company}\nForm: {filing['form']}\nFiled: {filing['filed']}"
+        metadata = {
+            "source": f"{ticker} {filing['form']} filed {filing['filed']}",
+            "ticker": ticker,
+            "company": company,
+            "period": filing["filed"],
+            "form": filing["form"],
+            "focus_tag": "contracts",
+            "page": 1,
+            "url": _archive_url(cik, filing["accession"], filing["document"]),
+        }
+        if semantic:
+            documents.extend(semantic_chunks(header, passages, metadata))
+            continue
+        documents.extend(
+            fixed_chunks(
+                [Document(page_content=f"{header}\n\n{passage}", metadata=dict(metadata)) for passage in passages]
             )
-    if not documents:
-        return [], streams
-    return splitter.split_documents(documents), streams
+        )
+    return documents, streams
 
 
 def _keep_streams(
@@ -498,16 +519,19 @@ def _get_json(url: str) -> dict:
         return json.load(response)
 
 
-def _replace(documents: list[Document], ids: list[str]) -> None:
-    clear_library()
-    store = get_vectorstore()
-    for start in range(0, len(documents), 64):
-        store.add_documents(documents[start : start + 64], ids=ids[start : start + 64])
+def _company_tickers() -> dict:
+    path = _CACHE / "company_tickers.json"
+    if path.is_file() and time.time() - path.stat().st_mtime < 7 * 86400:
+        return json.loads(path.read_text(encoding="utf-8"))
+    payload = _get_json(_COMPANY_TICKERS_URL)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return payload
 
 
 def main() -> None:
     reset_client()
-    results = load_mag7()
+    results = load_portfolio()
     for result in results:
         if result.error:
             print(f"{result.ticker}: {result.error}")
